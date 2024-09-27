@@ -3,8 +3,7 @@
 
 use nucleo_l053r8 as _;
 
-use core::cell::RefCell;
-use core::ops::DerefMut;
+use core::cell::Cell;
 
 use cortex_m::asm;
 use cortex_m::interrupt::Mutex;
@@ -18,8 +17,8 @@ use stm32l0xx_hal::{
     timer::Timer,
 };
 
-static LED: Mutex<RefCell<Option<gpioa::PA5<Output<PushPull>>>>> = Mutex::new(RefCell::new(None));
-static TIMER: Mutex<RefCell<Option<Timer<pac::TIM2>>>> = Mutex::new(RefCell::new(None));
+static LED: Mutex<Cell<Option<gpioa::PA5<Output<PushPull>>>>> = Mutex::new(Cell::new(None));
+static TIMER: Mutex<Cell<Option<Timer<pac::TIM2>>>> = Mutex::new(Cell::new(None));
 
 #[entry]
 fn main() -> ! {
@@ -36,14 +35,14 @@ fn main() -> ! {
     let led = gpioa.pa5.into_push_pull_output();
 
     // Configure the timer.
-    let mut timer = dp.TIM2.timer(10.Hz(), &mut rcc);
+    let mut timer = dp.TIM2.timer(1.Hz(), &mut rcc);
     timer.listen();
 
     // Store the LED and timer in mutex refcells to make them available from the
     // timer interrupt.
     cortex_m::interrupt::free(|cs| {
-        *LED.borrow(cs).borrow_mut() = Some(led);
-        *TIMER.borrow(cs).borrow_mut() = Some(timer);
+        LED.borrow(cs).set(Some(led));
+        TIMER.borrow(cs).set(Some(timer));
     });
 
     // Enable the timer interrupt in the NVIC.
@@ -57,25 +56,25 @@ fn main() -> ! {
 }
 
 #[interrupt]
+#[allow(non_snake_case)]
 fn TIM2() {
     // Keep a state to blink the LED.
-    static mut STATE: bool = false;
+    static mut LED_STATE: bool = false;
 
     cortex_m::interrupt::free(|cs| {
-        if let Some(ref mut timer) = TIMER.borrow(cs).borrow_mut().deref_mut() {
-            // Clear the interrupt flag.
-            timer.clear_irq();
+        let mut timer = TIMER.borrow(cs).replace(None)?;
+        timer.clear_irq();
+        TIMER.borrow(cs).set(Some(timer));
 
-            // Change the LED state on each interrupt.
-            if let Some(ref mut led) = LED.borrow(cs).borrow_mut().deref_mut() {
-                if *STATE {
-                    led.set_low().unwrap();
-                    *STATE = false;
-                } else {
-                    led.set_high().unwrap();
-                    *STATE = true;
-                }
-            }
-        }
-    });
+        let mut led = LED.borrow(cs).replace(None)?;
+        LED_STATE
+            .then(|| led.set_low())
+            .unwrap_or_else(|| led.set_high())
+            .unwrap();
+        *LED_STATE = !*LED_STATE;
+        LED.borrow(cs).set(Some(led));
+
+        Some(())
+    })
+    .unwrap()
 }
